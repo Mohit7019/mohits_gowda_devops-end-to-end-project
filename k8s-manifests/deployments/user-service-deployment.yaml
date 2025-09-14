@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
       - name: user-service
-        image: YOUR-ACCOUNT-ID.dkr.ecr.us-east-1.amazonaws.com/devops-cluster-user-service:latest
+        image: 581797537505.dkr.ecr.us-east-1.amazonaws.com/devops-cluster-user-service:latest
         ports:
         - containerPort: 3001
           name: http

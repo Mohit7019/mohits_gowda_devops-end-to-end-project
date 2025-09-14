@@ -19,7 +19,7 @@ spec:
     spec:
       containers:
       - name: frontend
-        image: YOUR-ACCOUNT-ID.dkr.ecr.us-east-1.amazonaws.com/devops-cluster-frontend:latest
+        image: 581797537505.dkr.ecr.us-east-1.amazonaws.com/devops-cluster-frontend:latest
         ports:
         - containerPort: 80
           name: http
