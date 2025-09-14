@@ -1,0 +1,298 @@
+pipeline {
+    agent any
+    
+    environment {
+        // AWS Configuration
+        AWS_REGION = 'us-east-1'
+        ECR_REPOSITORY_PREFIX = 'devops-cluster'
+        CLUSTER_NAME = 'devops-cluster'
+        
+        // Application Configuration
+        USER_SERVICE_IMAGE = "${ECR_REPOSITORY_PREFIX}-user-service"
+        FRONTEND_IMAGE = "${ECR_REPOSITORY_PREFIX}-frontend"
+        
+        // Security Tools
+        SONAR_PROJECT_KEY = 'devops-project'
+        
+        // Git Configuration
+        GIT_COMMIT_SHORT = sh(
+            script: "printf \$(git rev-parse --short HEAD)", 
+            returnStdout: true
+        )
+        
+        BUILD_NUMBER_SHORT = "${BUILD_NUMBER}"
+    }
+    
+    tools {
+        nodejs 'NodeJS-18'
+    }
+    
+    stages {
+        stage('Checkout') {
+            steps {
+                echo 'Checking out source code...'
+                checkout scm
+                
+                script {
+                    env.GIT_COMMIT_MSG = sh(
+                        script: 'git log -1 --pretty=%B',
+                        returnStdout: true
+                    ).trim()
+                }
+                
+                echo "Building commit: ${env.GIT_COMMIT_SHORT}"
+                echo "Commit message: ${env.GIT_COMMIT_MSG}"
+            }
+        }
+        
+        stage('Install Dependencies') {
+            parallel {
+                stage('Backend Dependencies') {
+                    steps {
+                        dir('application/backend/user-service') {
+                            sh 'npm ci'
+                        }
+                    }
+                }
+                stage('Frontend Dependencies') {
+                    steps {
+                        dir('application/frontend') {
+                            sh 'npm ci'
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Code Quality & Security Analysis') {
+            parallel {
+                stage('SonarQube Analysis') {
+                    steps {
+                        script {
+                            def scannerHome = tool 'SonarQube Scanner'
+                            withSonarQubeEnv('SonarQube Server') {
+                                sh """
+                                    ${scannerHome}/bin/sonar-scanner \
+                                    -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
+                                    -Dsonar.sources=./application \
+                                    -Dsonar.exclusions=**/node_modules/**,**/build/** \
+                                    -Dsonar.javascript.lcov.reportPaths=./application/frontend/coverage/lcov.info
+                                """
+                            }
+                        }
+                    }
+                }
+                
+                stage('OWASP Dependency Check') {
+                    steps {
+                        dependencyCheck additionalArguments: '''
+                            --scan ./application
+                            --format XML 
+                            --format HTML
+                            --enableRetired
+                            --enableExperimental
+                        ''', odcInstallation: 'OWASP Dependency-Check'
+                        
+                        dependencyCheckPublisher pattern: '**/dependency-check-report.xml'
+                    }
+                }
+                
+                stage('Secrets Scanning') {
+                    steps {
+                        sh '''
+                            # Install truffleHog for secrets scanning
+                            docker run --rm -v "$PWD:/pwd" trufflesecurity/trufflehog:latest github --repo https://github.com/${GIT_URL#*github.com/} --branch main
+                        '''
+                    }
+                }
+            }
+        }
+        
+        stage('Run Tests') {
+            parallel {
+                stage('Backend Tests') {
+                    steps {
+                        dir('application/backend/user-service') {
+                            sh 'npm test -- --coverage --watchAll=false'
+                        }
+                    }
+                    post {
+                        always {
+                            publishTestResults testResultsPattern: 'application/backend/user-service/coverage/junit.xml'
+                        }
+                    }
+                }
+                stage('Frontend Tests') {
+                    steps {
+                        dir('application/frontend') {
+                            sh 'CI=true npm test -- --coverage --watchAll=false'
+                        }
+                    }
+                    post {
+                        always {
+                            publishTestResults testResultsPattern: 'application/frontend/coverage/junit.xml'
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Build Docker Images') {
+            parallel {
+                stage('Build User Service Image') {
+                    steps {
+                        script {
+                            dir('application/backend/user-service') {
+                                def userServiceImage = docker.build("${USER_SERVICE_IMAGE}:${BUILD_NUMBER_SHORT}")
+                                env.USER_SERVICE_IMAGE_FULL = "${userServiceImage.id}"
+                            }
+                        }
+                    }
+                }
+                stage('Build Frontend Image') {
+                    steps {
+                        script {
+                            dir('application/frontend') {
+                                def frontendImage = docker.build("${FRONTEND_IMAGE}:${BUILD_NUMBER_SHORT}")
+                                env.FRONTEND_IMAGE_FULL = "${frontendImage.id}"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        stage('Container Security Scanning') {
+            parallel {
+                stage('Scan User Service Image') {
+                    steps {
+                        sh """
+                            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+                                aquasec/trivy image --format json --output user-service-scan.json \
+                                ${USER_SERVICE_IMAGE}:${BUILD_NUMBER_SHORT}
+                        """
+                    }
+                }
+                stage('Scan Frontend Image') {
+                    steps {
+                        sh """
+                            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+                                aquasec/trivy image --format json --output frontend-scan.json \
+                                ${FRONTEND_IMAGE}:${BUILD_NUMBER_SHORT}
+                        """
+                    }
+                }
+            }
+        }
+        
+        stage('Push to ECR') {
+            steps {
+                script {
+                    // Get ECR login token
+                    sh '''
+                        aws ecr get-login-password --region ${AWS_REGION} | \
+                        docker login --username AWS --password-stdin ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
+                    '''
+                    
+                    // Get AWS Account ID
+                    env.AWS_ACCOUNT_ID = sh(
+                        script: 'aws sts get-caller-identity --query Account --output text',
+                        returnStdout: true
+                    ).trim()
+                    
+                    // Tag and push images
+                    sh """
+                        # Tag images for ECR
+                        docker tag ${USER_SERVICE_IMAGE}:${BUILD_NUMBER_SHORT} \
+                            ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${USER_SERVICE_IMAGE}:${BUILD_NUMBER_SHORT}
+                        
+                        docker tag ${FRONTEND_IMAGE}:${BUILD_NUMBER_SHORT} \
+                            ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${FRONTEND_IMAGE}:${BUILD_NUMBER_SHORT}
+                        
+                        # Push to ECR
+                        docker push ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${USER_SERVICE_IMAGE}:${BUILD_NUMBER_SHORT}
+                        docker push ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${FRONTEND_IMAGE}:${BUILD_NUMBER_SHORT}
+                        
+                        # Also tag as latest
+                        docker tag ${USER_SERVICE_IMAGE}:${BUILD_NUMBER_SHORT} \
+                            ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${USER_SERVICE_IMAGE}:latest
+                        
+                        docker tag ${FRONTEND_IMAGE}:${BUILD_NUMBER_SHORT} \
+                            ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${FRONTEND_IMAGE}:latest
+                        
+                        docker push ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${USER_SERVICE_IMAGE}:latest
+                        docker push ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${FRONTEND_IMAGE}:latest
+                    """
+                }
+            }
+        }
+        
+        stage('Update Kubernetes Manifests') {
+            steps {
+                script {
+                    // Clone GitOps repository (separate repo for K8s manifests)
+                    sh '''
+                        git clone https://github.com/YOUR-USERNAME/devops-k8s-manifests.git
+                        cd devops-k8s-manifests
+                        
+                        # Update image tags in deployment files
+                        sed -i "s|image: .*user-service:.*|image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${USER_SERVICE_IMAGE}:${BUILD_NUMBER_SHORT}|g" \
+                            deployments/user-service-deployment.yaml
+                        
+                        sed -i "s|image: .*frontend:.*|image: ${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${FRONTEND_IMAGE}:${BUILD_NUMBER_SHORT}|g" \
+                            deployments/frontend-deployment.yaml
+                        
+                        # Commit and push changes
+                        git config user.name "Jenkins"
+                        git config user.email "jenkins@company.com"
+                        git add .
+                        git commit -m "Update image tags to build ${BUILD_NUMBER_SHORT} - ${GIT_COMMIT_SHORT}"
+                        git push origin main
+                    '''
+                }
+            }
+        }
+    }
+    
+    post {
+        always {
+            echo 'Pipeline completed!'
+            
+            // Clean up Docker images to save space
+            sh '''
+                docker image prune -f
+                docker system prune -f
+            '''
+            
+            // Archive security scan results
+            archiveArtifacts artifacts: '*-scan.json', fingerprint: true
+            
+            // Publish security scan results
+            publishHTML([
+                allowMissing: false,
+                alwaysLinkToLastBuild: true,
+                keepAll: true,
+                reportDir: '.',
+                reportFiles: '*-scan.json',
+                reportName: 'Security Scan Report'
+            ])
+        }
+        
+        success {
+            echo 'Pipeline succeeded!'
+            // Send success notification
+            slackSend channel: '#devops', 
+                      color: 'good', 
+                      message: "✅ Build ${BUILD_NUMBER} succeeded! Commit: ${GIT_COMMIT_SHORT}"
+        }
+        
+        failure {
+            echo 'Pipeline failed!'
+            // Send failure notification
+            slackSend channel: '#devops', 
+                      color: 'danger', 
+                      message: "❌ Build ${BUILD_NUMBER} failed! Commit: ${GIT_COMMIT_SHORT}"
+        }
+    }
+}
+
