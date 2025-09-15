@@ -21,7 +21,7 @@ spec:
       - name: frontend
         image: 581797537505.dkr.ecr.us-east-1.amazonaws.com/devops-cluster-frontend:latest
         ports:
-        - containerPort: 80
+        - containerPort: 8080
           name: http
         resources:
           requests:
@@ -33,13 +33,13 @@ spec:
         livenessProbe:
           httpGet:
             path: /health
-            port: 80
+            port: 8080
           initialDelaySeconds: 30
           periodSeconds: 10
         readinessProbe:
           httpGet:
             path: /health
-            port: 80
+            port: 8080
           initialDelaySeconds: 5
           periodSeconds: 5
         securityContext:
@@ -50,11 +50,14 @@ spec:
         - name: nginx-config
           mountPath: /etc/nginx/conf.d/default.conf
           subPath: nginx.conf
+        - name: nginx-cache
+          mountPath: /var/cache/nginx
       volumes:
       - name: nginx-config
         configMap:
           name: nginx-config
-      restartPolicy: Always
+      - name: nginx-cache
+        emptyDir: {}
 ---
 apiVersion: v1
 kind: Service
@@ -67,7 +70,7 @@ spec:
   type: ClusterIP
   ports:
   - port: 80
-    targetPort: 80
+    targetPort: 8080
     protocol: TCP
     name: http
   selector:

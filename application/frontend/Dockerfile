@@ -7,11 +7,11 @@ WORKDIR /app
 COPY package*.json ./
 
 # Install dependencies
-RUN npm ci
+RUN npm install
 
 # Copy source code
-COPY src/ ./src/
 COPY public/ ./public/
+COPY src/ ./src/
 
 # Build the app
 RUN npm run build
