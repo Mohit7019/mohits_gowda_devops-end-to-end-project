@@ -1,0 +1,68 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-service
+  namespace: devops-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: user-service
+  template:
+    metadata:
+      labels:
+        app: user-service
+    spec:
+      containers:
+      - name: user-service
+        image: node:18-alpine
+        command: ["sh", "-c"]
+        args:
+        - |
+          npm install express &&
+          node -e "
+          const express = require('express');
+          const app = express();
+          const PORT = 3001;
+          
+          app.use(express.json());
+          
+          app.get('/health', (req, res) => {
+            res.json({ status: 'healthy', timestamp: new Date().toISOString() });
+          });
+          
+          app.get('/users', (req, res) => {
+            res.json({ 
+              success: true, 
+              data: [
+                { id: 1, name: 'John Doe', email: 'john@example.com' },
+                { id: 2, name: 'Jane Smith', email: 'jane@example.com' }
+              ]
+            });
+          });
+          
+          app.listen(PORT, () => {
+            console.log('User service running on port ' + PORT);
+          });
+          "
+        ports:
+        - containerPort: 3001
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "256Mi"
+            cpu: "200m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3001
+          initialDelaySeconds: 60
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 3001
+          initialDelaySeconds: 30
+          periodSeconds: 5

@@ -1,0 +1,106 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-service
+  namespace: devops-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: user-service
+  template:
+    metadata:
+      labels:
+        app: user-service
+    spec:
+      containers:
+      - name: user-service
+        image: httpd:alpine
+        ports:
+        - containerPort: 80
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+          limits:
+            memory: "128Mi"
+            cpu: "100m"
+        volumeMounts:
+        - name: user-service-content
+          mountPath: /usr/local/apache2/htdocs
+        livenessProbe:
+          httpGet:
+            path: /health.json
+            port: 80
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health.json
+            port: 80
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: user-service-content
+        configMap:
+          name: user-service-content
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: user-service-content
+  namespace: devops-app
+data:
+  health.json: |
+    {
+      "status": "healthy",
+      "timestamp": "2025-09-15T06:28:00.000Z",
+      "service": "user-service",
+      "version": "1.0.0"
+    }
+  users.json: |
+    {
+      "success": true,
+      "data": [
+        {
+          "id": 1,
+          "name": "John Doe",
+          "email": "john@example.com"
+        },
+        {
+          "id": 2,
+          "name": "Jane Smith",
+          "email": "jane@example.com"
+        }
+      ],
+      "count": 2
+    }
+  index.html: |
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>User Service API</title>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 40px; }
+            .endpoint { background: #f5f5f5; padding: 10px; margin: 10px 0; border-radius: 5px; }
+        </style>
+    </head>
+    <body>
+        <h1>🚀 User Service API</h1>
+        <p>Simple REST API for user management</p>
+        
+        <h2>Available Endpoints:</h2>
+        <div class="endpoint">
+            <strong>GET /health.json</strong> - Health check endpoint
+        </div>
+        <div class="endpoint">
+            <strong>GET /users.json</strong> - Get all users
+        </div>
+        
+        <h2>Test Links:</h2>
+        <ul>
+            <li><a href="/health.json">Health Check</a></li>
+            <li><a href="/users.json">Get Users</a></li>
+        </ul>
+    </body>
+    </html>
